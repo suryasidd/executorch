@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from typing import Any, List, Optional, Sequence, Tuple
+import logging
 
 import executorch
 import executorch.backends.test.harness.stages as BaseStages
@@ -16,6 +17,9 @@ from executorch.backends.test.harness.stages import StageType
 from executorch.exir import EdgeCompileConfig
 from executorch.exir.backend.backend_details import CompileSpec
 from executorch.exir.backend.partitioner import Partitioner
+
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
 
 
 class Export(BaseStages.Export):
@@ -62,7 +66,7 @@ class ToEdgeTransformAndLower(BaseStages.ToEdgeTransformAndLower):
 
         # If no partitioners provided, use OpenvinoPartitioner with compile specs
         if partitioners is None:
-            partitioners = [OpenvinoPartitioner(compile_specs)]
+            partitioners = [OpenvinoPartitioner(compile_specs, verbose=True)]
 
         super().__init__(
             default_partitioner_cls=None,  # We're providing explicit partitioners
@@ -82,7 +86,7 @@ class Partition(BaseStages.Partition):
             compile_specs = [CompileSpec("device", b"CPU")]
 
         super().__init__(
-            partitioner=partitioner or OpenvinoPartitioner(compile_specs),
+            partitioner=partitioner or OpenvinoPartitioner(compile_specs, verbose=True),
         )
 
 
