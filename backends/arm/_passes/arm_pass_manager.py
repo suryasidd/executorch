@@ -14,17 +14,15 @@ from executorch.backends.arm._passes import (
     AnnotateDecomposedMatmulPass,
     AnnotateOutputDimOrderPass,
     BroadcastArgsPass,
-    CastBoolToInt8Pass,
     CastInt64BuffersToInt32Pass,
     CastToInt32Pass,
-    ComputeConstantOpsAOT,
+    ComputeConstantOpsAOTPass,
     Conv1dUnsqueezePass,
     ConvertELUParamsPass,
     ConvertExpandCopyToRepeatPass,
     ConvertFullLikeToFullPass,
     ConvertInt64ConstOpsToInt32Pass,
     ConvertInt64OutputOpsToInt32Pass,
-    ConvertIntPowToMuls,
     ConvertMinMaxPass,
     ConvertMmToBmmPass,
     ConvertPermuteSingletonToViewPass,
@@ -40,7 +38,7 @@ from executorch.backends.arm._passes import (
     DecomposeAsinhPass,
     DecomposeAtanhPass,
     DecomposeAtanPass,
-    DecomposeAvgPool2d,
+    DecomposeAvgPool2dPass,
     DecomposeBatchNormNoStatsPass,
     DecomposeConv2dWithInt16ActivationPass,
     DecomposeCoshPass,
@@ -54,20 +52,22 @@ from executorch.backends.arm._passes import (
     DecomposeFloorDividePass,
     DecomposeGeluPass,
     DecomposeGluPass,
-    DecomposeGroupedConv,
+    DecomposeGroupedConvPass,
     DecomposeGroupNormPass,
+    DecomposeInt32ClampPass,
+    DecomposeIntPowPass,
     DecomposeLayerNormPass,
     DecomposeLeakyReLUPass,
+    DecomposeLinalgVectorNormPass,
     DecomposeLinearPass,
-    DecomposeLinearVectorNormPass,
     DecomposeLogitPass,
-    DecomposeMaskedFill,
-    DecomposeMaxPool2DPass,
+    DecomposeMaskedFillPass,
+    DecomposeMaxPool2dPass,
     DecomposeMeanDimPass,
     DecomposeNotEqualPass,
     DecomposeRemainderPass,
     DecomposeRoundPass,
-    DecomposeScaledDotProductAttention,
+    DecomposeScaledDotProductAttentionPass,
     DecomposeSelectPass,
     DecomposeSignPass,
     DecomposeSiluPass,
@@ -79,23 +79,25 @@ from executorch.backends.arm._passes import (
     DecomposeVarPass,
     DecorateFp32toInt32CastingPass,
     FoldAndAnnotateQParamsPass,
-    FuseBatchnorm2DPass,
+    FuseBatchNorm2dPass,
     FuseConstantArgsPass,
     FuseDuplicateUsersPass,
     FuseEqualPlaceholdersPass,
     FuseQuantizedActivationPass,
     FuseViewCopyTransformPass,
+    InsertControlFlowRescalesPass,
     InsertInt32CastsAfterInt64PlaceholdersPass,
     InsertRescaleInt32Pass,
     InsertRescalePass,
     InsertTableOpsPass,
     MatchArgDtypePass,
     MatchArgRanksPass,
-    QuantizeOperatorArguments,
+    PromoteBoolOperandsPass,
+    QuantizeClampArgumentsPass,
     RemoveGetItemPass,
     RemoveGraphAssertsPass,
     RemoveNoopPass,
-    ReplaceInfValues,
+    ReplaceInfValuesPass,
     ReplaceScalarWithTensorByProfilePass,
     RewriteConv2dPass,
     RewriteMatmulPass,
@@ -121,7 +123,6 @@ from torch.nn.modules import Module
 
 
 class ArmPassManager(PassManager):
-
     def __init__(self, tosa_spec: TosaSpecification) -> None:
         self.tosa_spec = tosa_spec
         super().__init__()
@@ -173,6 +174,7 @@ class ArmPassManager(PassManager):
                 FuseQuantizedActivationPass(),
                 RemoveGetItemPass(),
                 ConvertToClampPass(),
+                DecomposeInt32ClampPass(),
                 DecomposeGroupNormPass(),
                 DecomposeLayerNormPass(),
                 DecomposeBatchNormNoStatsPass(),
@@ -181,7 +183,7 @@ class ArmPassManager(PassManager):
                 AnnotateDecomposedMatmulPass(),
                 ConvertELUParamsPass(),
                 ConvertSplitToSlicePass(),
-                QuantizeOperatorArguments(),
+                QuantizeClampArgumentsPass(),
             ]
         )
 
@@ -195,6 +197,7 @@ class ArmPassManager(PassManager):
                 # Ticket: MLETORCH-1539
                 DecomposeLinearPass(),
                 InsertRescaleInt32Pass(),
+                InsertControlFlowRescalesPass(),
             ]
         )
 
@@ -202,7 +205,7 @@ class ArmPassManager(PassManager):
         self.add_passes(
             [
                 DecomposeLogitPass(),
-                DecomposeMaskedFill(),
+                DecomposeMaskedFillPass(),
                 DecomposeRoundPass(),
                 DecomposeAcoshPass(),
                 DecomposeAsinhPass(),
@@ -214,14 +217,14 @@ class ArmPassManager(PassManager):
                 DecomposeAddmmPass(),
                 DecomposeEluPass(),
                 DecomposeExpm1Pass(),
-                ConvertIntPowToMuls(),
-                CastBoolToInt8Pass(),
+                DecomposeIntPowPass(),
+                PromoteBoolOperandsPass(),
                 DecomposeSinhPass(),
                 DecomposeSignPass(),
                 DecomposeFloorDividePass(),
                 DecomposeGeluPass(),
                 DecomposeAddSubAlphaPass(),
-                DecomposeGroupedConv(),
+                DecomposeGroupedConvPass(),
                 Conv1dUnsqueezePass(),
             ]
         )
@@ -247,7 +250,7 @@ class ArmPassManager(PassManager):
                 DecomposeRemainderPass(),
                 DecomposeDivTensorModePass(),
                 DecomposeEmbeddingPass(),
-                FuseBatchnorm2DPass(exported_program),
+                FuseBatchNorm2dPass(exported_program),
                 ConvertMmToBmmPass(),
                 DecomposeGluPass(),
                 DecomposeLeakyReLUPass(),
@@ -256,13 +259,13 @@ class ArmPassManager(PassManager):
                 ConvertMinMaxPass(),
                 DecomposeAnyPass(),
                 DecomposeAdaptiveAvgPool2dPass(),
-                DecomposeAvgPool2d(),
+                DecomposeAvgPool2dPass(),
                 DecorateFp32toInt32CastingPass(),
-                ComputeConstantOpsAOT(exported_program),
+                ComputeConstantOpsAOTPass(exported_program),
                 ConvertExpandCopyToRepeatPass(),
                 UnsqueezeBeforeRepeatPass(),
                 DecomposeCumsumPass(exported_program),
-                DecomposeMaxPool2DPass(),
+                DecomposeMaxPool2dPass(),
                 SizeAdjustInputPass(),
                 DecomposeSelectPass(),
                 ConvertSqueezesToViewPass(),
@@ -324,10 +327,10 @@ class ArmPassManager(PassManager):
                 ConvertInt64OutputOpsToInt32Pass(),
                 InsertInt32CastsAfterInt64PlaceholdersPass(),
                 DecomposeEmbeddingPass(),
-                DecomposeScaledDotProductAttention(),
+                DecomposeScaledDotProductAttentionPass(),
                 DecomposeRoundPass(),
                 DecomposeLogitPass(),
-                CastBoolToInt8Pass(),
+                PromoteBoolOperandsPass(),
                 DecomposeSignPass(),
                 DecomposeAddmmPass(),
                 DecomposeRemainderPass(),
@@ -357,10 +360,10 @@ class ArmPassManager(PassManager):
                 DecomposeGluPass(),
                 DecomposeDivPass(),
                 DecomposeLeakyReLUPass(),
-                DecomposeLinearVectorNormPass(),
+                DecomposeLinalgVectorNormPass(),
                 DecomposeSqrtPass(),
                 DecomposeSiluPass(),
-                DecomposeAvgPool2d(),
+                DecomposeAvgPool2dPass(),
                 (
                     DecomposeSoftmaxUnstablePass()
                     if self.tosa_spec.is_U55_subset
@@ -373,8 +376,8 @@ class ArmPassManager(PassManager):
         # Postprocessing passes
         self.add_passes(
             [
-                ReplaceInfValues(),
-                DecomposeMaskedFill() if not self.tosa_spec.is_U55_subset else None,
+                ReplaceInfValuesPass(),
+                DecomposeMaskedFillPass() if not self.tosa_spec.is_U55_subset else None,
             ]
         )
 

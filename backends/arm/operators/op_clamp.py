@@ -40,7 +40,6 @@ class ClampVisitor(NodeVisitor):
     def _get_min_max_arguments(
         self, node: Node, dtype: torch.dtype
     ) -> Tuple[int | float, int | float]:
-
         def cast_type(value: Any) -> int | float:
             if isinstance(value, int):
                 return value
@@ -91,12 +90,17 @@ class ClampVisitor(NodeVisitor):
         validate_valid_dtype(
             self.target,
             [inputs[0], output],
-            [ts.DType.INT8, ts.DType.INT16, ts.DType.FP16, ts.DType.FP32],
+            [
+                ts.DType.INT8,
+                ts.DType.INT16,
+                ts.DType.FP16,
+                ts.DType.FP32,
+            ],
             output.tosa_spec,
         )
 
         node_input_dtype = node.meta["val"].dtype
-        # NOTE: Quantization of the min/max arguments is handled by QuantizeOperatorArguments
+        # NOTE: Quantization of the min/max arguments is handled by QuantizeClampArgumentsPass
         min_val, max_val = self._get_min_max_arguments(node, node_input_dtype)
 
         attr = ts.TosaSerializerAttribute()
