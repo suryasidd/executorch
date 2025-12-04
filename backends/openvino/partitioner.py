@@ -28,6 +28,7 @@ from torch.fx.passes.infra.partitioner import CapabilityBasedPartitioner
 from torch.fx.passes.operator_support import OperatorSupportBase
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 class PatternNode:
@@ -132,9 +133,11 @@ class OpenvinoPartitioner(Partitioner):
         :param verbose: if True, print out more information about the partitioner.
             Default level is WARNING. If verbose is True, level is set to DEBUG.
         """
+        logger.info("HELLO FROM PARTITIONER")
         if verbose:
             logger.setLevel(logging.DEBUG)
-            logger.debug("Verbose logging enabled for OpenVINO partitioner.")
+            logger.debug("New Verbose logging enabled for OpenVINO partitioner.")
+            logger.info("INFO LOG ALSO WORKING")
 
         self.delegation_spec = DelegationSpec(OpenvinoBackend.__name__, compile_spec)
         self._op_types_to_skip = op_types_to_skip
@@ -231,6 +234,7 @@ class OpenvinoPartitioner(Partitioner):
         :param exported_program: The exported program.
         :return: A PartitionResult containing the partitioned graph and delegation tags.
         """
+        logger.info("IN PARTITION")
         logger.debug("\n[PARTITIONER DEBUG] ===== Starting OpenVINO Partitioning =====")
         logger.debug(f"[PARTITIONER DEBUG] Graph has {len(list(exported_program.graph_module.graph.nodes))} nodes")
 
