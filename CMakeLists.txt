@@ -543,6 +543,13 @@ endif()
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/kernels/portable/cpu/util)
 
+# Custom ops AOT needs Torch. Find it at root scope before processing the
+# portable subdirectory so that imported targets (e.g. MKL::MKL) are created at
+# root scope rather than in a child directory scope.
+if(EXECUTORCH_BUILD_KERNELS_CUSTOM_AOT AND EXECUTORCH_BUILD_PORTABLE_OPS)
+  find_package_torch()
+endif()
+
 if(EXECUTORCH_BUILD_PORTABLE_OPS)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/kernels/portable)
 endif()
@@ -1215,16 +1222,15 @@ if(EXECUTORCH_BUILD_EXECUTOR_RUNNER)
   if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_link_options_gc_sections(executor_runner)
   endif()
-  target_link_libraries(executor_runner ${_executor_runner_libs})
+  target_link_libraries(executor_runner PRIVATE ${_executor_runner_libs})
   target_compile_options(executor_runner PUBLIC ${_common_compile_options})
   if(EXECUTORCH_BUILD_ARM_ETHOSU_LINUX)
-    target_sources(
-      executor_runner
-      PRIVATE
-        ${CMAKE_SOURCE_DIR}/examples/arm/executor_runner/ethosu_link_helper.cpp
-    )
     target_compile_definitions(
       executor_runner PRIVATE EXECUTORCH_BUILD_ARM_ETHOSU_LINUX=1
+    )
+    target_link_libraries(
+      executor_runner
+      PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,executorch_delegate_ethos_u>
     )
     # Wrap static linking like the delegate_runner to keep images
     # self-contained.
