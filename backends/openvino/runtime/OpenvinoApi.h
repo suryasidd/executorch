@@ -95,6 +95,7 @@ using ov_tensor_free_fn = void (*)(ov_tensor_t*);
 using ov_shape_create_fn =
     ov_status_e (*)(int64_t, const int64_t*, ov_shape_t*);
 using ov_shape_free_fn = ov_status_e (*)(ov_shape_t*);
+using ov_tensor_get_shape_fn = ov_status_e (*)(const ov_tensor_t*, ov_shape_t*);
 
 struct DlCloser {
   void operator()(void* handle) {
@@ -126,6 +127,7 @@ struct OpenvinoFunctions {
   ov_tensor_free_fn tensor_free = nullptr;
   ov_shape_create_fn shape_create = nullptr;
   ov_shape_free_fn shape_free = nullptr;
+  ov_tensor_get_shape_fn tensor_get_shape = nullptr;
 };
 
 } // namespace openvino

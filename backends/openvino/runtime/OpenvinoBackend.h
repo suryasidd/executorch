@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include <executorch/runtime/backend/interface.h>
 #include <executorch/runtime/core/error.h>
@@ -28,6 +29,7 @@ namespace openvino {
 struct ExecutionHandle {
   ov_compiled_model_t* compiled_model = nullptr;
   ov_infer_request_t* infer_request = nullptr;
+  std::vector<ov_tensor_t*> output_tensors;
 };
 
 class OpenvinoBackend final : public ::exr::BackendInterface {

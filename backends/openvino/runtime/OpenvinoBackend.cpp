@@ -14,6 +14,7 @@
 #include <executorch/runtime/core/error.h>
 #include <executorch/runtime/core/evalue.h>
 #include <executorch/runtime/core/exec_aten/util/scalar_type_util.h>
+#include <executorch/runtime/core/exec_aten/util/tensor_util.h>
 
 #include "OpenvinoBackend.h"
 
@@ -91,6 +92,7 @@ bool OpenvinoBackend::ensure_loaded() const {
     LOAD_SYM(tensor_free, ov_tensor_free)
     LOAD_SYM(shape_create, ov_shape_create)
     LOAD_SYM(shape_free, ov_shape_free)
+    LOAD_SYM(tensor_get_shape, ov_tensor_get_shape)
 
 #undef LOAD_SYM
 
@@ -281,23 +283,37 @@ exr::Error OpenvinoBackend::execute(
     }
   }
 
-  for (size_t i = 0; i < num_outputs; i++) {
-    ET_CHECK_OR_RETURN_ERROR(
-        args[num_inputs + i]->isTensor(),
-        InvalidArgument,
-        "OpenVINO: expected tensor for output %zu",
-        i);
-    auto output_tensor = args[num_inputs + i]->toTensor();
-    auto result = create_ov_tensor(output_tensor);
-    if (!result.ok()) {
-      return result.error();
+  // First call: wrap each ET output buffer (sized at the DYNAMIC_BOUND upper
+  // bound) in an ov_tensor_t and cache it on the handle. OV keeps a shared_ptr
+  // to the same ViewTensor and calls set_shape() on it each infer(), so the
+  // cached tensor always reflects the actual output shape.
+  // Stage into a temporary so the handle stays empty on failure.
+  if (execution_handle->output_tensors.empty()) {
+    std::vector<ov_tensor_t*> tensors(num_outputs, nullptr);
+    for (size_t i = 0; i < num_outputs; i++) {
+      ET_CHECK_OR_RETURN_ERROR(
+          args[num_inputs + i]->isTensor(),
+          InvalidArgument,
+          "OpenVINO: expected tensor for output %zu",
+          i);
+      auto result = create_ov_tensor(args[num_inputs + i]->toTensor());
+      if (!result.ok()) {
+        for (size_t j = 0; j < i; ++j) {
+          ov_.tensor_free(tensors[j]);
+        }
+        return result.error();
+      }
+      tensors[i] = result.get();
     }
-    ov_tensor_t* tensor = result.get();
+    execution_handle->output_tensors = std::move(tensors);
+  }
 
+  // Bind the stored output tensors to the infer request and run inference.
+  // OV writes directly into the ET buffers (zero-copy) and calls set_shape()
+  // on the stored tensors to reflect the actual output dimensions.
+  for (size_t i = 0; i < num_outputs; i++) {
     status = ov_.infer_request_set_output_tensor_by_index(
-        execution_handle->infer_request, i, tensor);
-    // Safe to free: see shared_ptr ownership comment on input tensor above.
-    ov_.tensor_free(tensor);
+        execution_handle->infer_request, i, execution_handle->output_tensors[i]);
     if (status != OV_STATUS_OK) {
       return exr::Error::Internal;
     }
@@ -307,6 +323,32 @@ exr::Error OpenvinoBackend::execute(
   if (status != OV_STATUS_OK) {
     ET_LOG(Error, "OpenVINO: inference failed (status=%d)", status);
     return exr::Error::Internal;
+  }
+
+  // The stored tensors now carry the actual output shapes (updated by OV).
+  // Update ET tensor metadata to match — no data movement.
+  for (size_t i = 0; i < num_outputs; i++) {
+    auto et_tensor = args[num_inputs + i]->toTensor();
+
+    ov_shape_t ov_out_shape = {};
+    status = ov_.tensor_get_shape(execution_handle->output_tensors[i], &ov_out_shape);
+    if (status != OV_STATUS_OK) {
+      return exr::Error::Internal;
+    }
+
+    int64_t rank = ov_out_shape.rank;
+    exa::SizesType new_sizes[exr::kTensorDimensionLimit];
+    for (int64_t d = 0; d < rank; ++d) {
+      new_sizes[d] = static_cast<exa::SizesType>(ov_out_shape.dims[d]);
+    }
+    ov_.shape_free(&ov_out_shape);
+
+    auto resize_err =
+        exr::resize_tensor(et_tensor, {new_sizes, static_cast<size_t>(rank)});
+    if (resize_err != exr::Error::Ok) {
+      ET_LOG(Error, "OpenVINO: failed to resize output tensor %zu", i);
+      return resize_err;
+    }
   }
 
   return exr::Error::Ok;
@@ -322,6 +364,15 @@ void OpenvinoBackend::destroy(exr::DelegateHandle* handle) const {
   }
 
   ExecutionHandle* execution_handle = static_cast<ExecutionHandle*>(handle);
+
+  if (ov_.tensor_free) {
+    for (ov_tensor_t* t : execution_handle->output_tensors) {
+      if (t) {
+        ov_.tensor_free(t);
+      }
+    }
+    execution_handle->output_tensors.clear();
+  }
 
   if (execution_handle->infer_request && ov_.infer_request_free) {
     ov_.infer_request_free(execution_handle->infer_request);
@@ -343,18 +394,11 @@ exr::Result<ov_tensor_t*> OpenvinoBackend::create_ov_tensor(
   auto sizes = tensor.sizes();
   int64_t rank = sizes.size();
   ET_CHECK_OR_RETURN_ERROR(
-      rank >= 0 && rank <= 1024,
+      rank >= 0 && static_cast<size_t>(rank) <= exr::kTensorDimensionLimit,
       InvalidArgument,
-      "OpenVINO: unreasonable tensor rank %" PRId64,
+      "OpenVINO: tensor rank %" PRId64 " exceeds limit",
       rank);
-  // Stack buffer for common ranks; heap-allocate via unique_ptr for larger.
-  int64_t dims_buf[8];
-  std::unique_ptr<int64_t[]> dims_heap;
-  int64_t* dims = dims_buf;
-  if (rank > 8) {
-    dims_heap.reset(new int64_t[rank]);
-    dims = dims_heap.get();
-  }
+  int64_t dims[exr::kTensorDimensionLimit];
   for (int64_t d = 0; d < rank; d++) {
     dims[d] = sizes[d];
   }
@@ -362,7 +406,6 @@ exr::Result<ov_tensor_t*> OpenvinoBackend::create_ov_tensor(
   // shape_create (the zero state is safe to skip).
   ov_shape_t shape = {};
   ov_status_e status = ov_.shape_create(rank, dims, &shape);
-  dims_heap.reset(); // Release heap dims (no-op if stack was used).
   if (status != OV_STATUS_OK) {
     return exr::Error::Internal;
   }

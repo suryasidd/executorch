@@ -94,6 +94,12 @@ if(EXECUTORCH_BUILD_METAL)
   executorch_target_link_options_shared_lib(metal_backend)
 endif()
 
+# Openvino backend
+if(TARGET openvino_backend)
+  list(APPEND _link_libraries openvino_backend)
+  executorch_target_link_options_shared_lib(openvino_backend)
+endif()
+
 # Add tokenizers
 list(APPEND _link_libraries tokenizers::tokenizers)
 

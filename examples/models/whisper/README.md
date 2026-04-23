@@ -20,7 +20,7 @@ module to generate the spectrogram tensor.
 
 ## Build
 
-Currently we have CUDA and Metal build support.
+Currently we have CUDA, Metal, and OpenVINO build support.
 
 For CPU:
 ```
@@ -35,6 +35,11 @@ make whisper-cuda
 For Metal:
 ```
 make whisper-metal
+```
+
+For OpenVINO:
+```
+make whisper-cpu  # Use CPU build with OpenVINO-exported model
 ```
 
 ## Usage
@@ -72,6 +77,20 @@ optimum-cli export executorch \
 
 This command generates:
 - `model.pte` — Compiled Whisper model (includes Metal kernel blob)
+
+#### OpenVINO backend:
+
+```bash
+optimum-cli export executorch \
+    --model openai/whisper-small \
+    --task automatic-speech-recognition \
+    --recipe openvino \
+    --dtype float32 \
+    --output_dir ./
+```
+
+This command generates:
+- `model.pte` — Compiled Whisper model with OpenVINO backend
 
 ### Preprocessor
 
@@ -153,7 +172,7 @@ cmake-out/examples/models/whisper/whisper_runner \
     --temperature 0
 ```
 
-#### Metal backend:
+#### Metal / OpenVINO backends:
 
 ```bash
 # Run the Whisper runner
