@@ -9,12 +9,15 @@
 #
 
 import logging
+import os
 import struct
-from typing import final, List, Optional
+from typing import final
 
 import numpy as np
 import torch
-
+from executorch.backends.nxp.backend.custom_delegation_options import (
+    CustomDelegationOptions,
+)
 from executorch.backends.nxp.backend.data_format import DataFormat
 from executorch.backends.nxp.backend.edge_program_converter import (
     EdgeProgramToIRConverter,
@@ -43,10 +46,11 @@ class NeutronCompileSpecBuilder:
     config: NeutronTargetSpec
 
     def __init__(self):
-        self.compile_spec: List[CompileSpec] = []
+        self.compile_spec: list[CompileSpec] = []
         self.compiler_flags = []
         self.output_format = None
-        self.operators_not_to_delegate: List[str] = []
+        self.intermediates_dir = None
+        self.operators_not_to_delegate: list[str] = []
         self.use_neutron_for_format_conversion = True
         self.fetch_constants_to_sram = False
         self.dump_kernel_selection_code = False
@@ -60,28 +64,30 @@ class NeutronCompileSpecBuilder:
     def neutron_compile_spec(
         self,
         config: str,
-        extra_flags: Optional[str] = None,
-        operators_not_to_delegate: Optional[List[str]] = None,
+        intermediates_dir: str | None = None,
+        extra_flags: str | None = None,
+        operators_not_to_delegate: list[str] | None = None,
         use_neutron_for_format_conversion: bool = True,
         fetch_constants_to_sram: bool = False,
         dump_kernel_selection_code: bool = False,
-    ):
-        """
-        Generate compile spec for Neutron NPU
+    ) -> "NeutronCompileSpecBuilder":
+        """Generate compile spec for Neutron NPU
 
-        Args:
-            config: Neutron accelerator configuration, e.g. "imxrt700"
-            extra_flags: Extra flags for the Neutron compiler
-            operators_not_to_delegate: List of operators that should not be delegated
-            use_neutron_for_format_conversion: If True, the EdgeProgramToIRConverter will insert `Transpose` ops to
+        :param config: Neutron accelerator configuration, e.g. "imxrt700"
+        :param intermediates_dir: Directory to store intermediate artifact files.
+        :param extra_flags: Extra flags for the Neutron compiler
+        :param operators_not_to_delegate: List of operators that should not be delegated
+        :param use_neutron_for_format_conversion: If True, the EdgeProgramToIRConverter will insert `Transpose` ops to
                                                 ensure that the IO matches the executorch partition, which will be
                                                 delegated to Neutron.
-            fetch_constants_to_sram: If True, the Neutron Converter will insert microinstructions to prefetch weights
+        :param fetch_constants_to_sram: If True, the Neutron Converter will insert microinstructions to prefetch weights
                                      from FLASH to SRAM. This should be used when the whole model does not fit into SRAM.
-            dump_kernel_selection_code: Whether Neutron converter dumps kernel selection code.
+        :param dump_kernel_selection_code: Whether Neutron converter dumps kernel selection code.
+        :return: self for method chaining
         """
 
         self.config = NeutronTargetSpec(config)
+        self.intermediates_dir = intermediates_dir
 
         assert (
             self.output_format is None
@@ -112,6 +118,7 @@ class NeutronCompileSpecBuilder:
                 CompileSpec("output_format", "tflite".encode()),
                 CompileSpec("compile_flags", " ".join(self.compiler_flags).encode()),
                 CompileSpec("target", self.config.get_name().encode()),
+                CompileSpec("intermediates_dir", f"{self.intermediates_dir}".encode()),
                 CompileSpec(
                     "operators_not_to_delegate",
                     ",".join(self.operators_not_to_delegate).encode(),
@@ -135,17 +142,19 @@ class NeutronCompileSpecBuilder:
 
 def generate_neutron_compile_spec(
     config: str,  # The target platform. For example "imxrt700".
-    system_config: Optional[str] = None,
-    extra_flags: Optional[str] = None,
-    operators_not_to_delegate: Optional[List[str]] = None,
+    system_config: str | None = None,
+    extra_flags: str | None = None,
+    intermediates_dir: str | None = None,
+    operators_not_to_delegate: list[str] | None = None,
     use_neutron_for_format_conversion: bool = True,
     fetch_constants_to_sram: bool = False,
     dump_kernel_selection_code: bool = False,
-) -> List[CompileSpec]:
+) -> list[CompileSpec]:
     return (
         NeutronCompileSpecBuilder()
         .neutron_compile_spec(
             config,
+            intermediates_dir=intermediates_dir,
             extra_flags=extra_flags,
             operators_not_to_delegate=operators_not_to_delegate,
             use_neutron_for_format_conversion=use_neutron_for_format_conversion,
@@ -162,7 +171,7 @@ class NeutronBackend(BackendDetails):
     @staticmethod
     def preprocess(  # noqa C901
         edge_program: ExportedProgram,
-        compile_spec: List[CompileSpec],
+        compile_spec: list[CompileSpec],
     ) -> PreprocessResult:
         logging.info("NeutronBackend::preprocess")
 
@@ -172,6 +181,7 @@ class NeutronBackend(BackendDetails):
         compile_flags = []
         binary = bytes()
         target = ""
+        intermediates_dir = "None"
         use_neutron_for_format_conversion = None
         fetch_constants_to_sram = False
         dump_kernel_selection_code = None
@@ -180,6 +190,8 @@ class NeutronBackend(BackendDetails):
                 output_format = spec.value.decode()
             if spec.key == "target":
                 target = spec.value.decode()
+            if spec.key == "intermediates_dir":
+                intermediates_dir = spec.value.decode()
             if spec.key == "compile_flags":
                 compile_flags.append(spec.value.decode())
             if spec.key == "use_neutron_for_format_conversion":
@@ -192,6 +204,10 @@ class NeutronBackend(BackendDetails):
         # Check that the output format is set in the compile spec
         if not output_format:
             raise RuntimeError("output format is required")
+
+        # Check if provided intermediates_dir is a correct path (None is decoded to str)
+        if intermediates_dir != "None" and not os.path.isdir(intermediates_dir):
+            raise ValueError("intermediates_dir is not a directory path.")
 
         for node in edge_program.graph.nodes:
             if node.op == "call_function":
@@ -217,22 +233,32 @@ class NeutronBackend(BackendDetails):
                 edge_program,
                 neutron_target_spec=NeutronTargetSpec(target),
                 conversion_config=conversion_config,
+                custom_delegation_options=CustomDelegationOptions(),
             )
 
             neutron_model = NeutronConverterManager(dump_kernel_selection_code).convert(
-                tflite_model, target, delegation_tag, fetch_constants_to_sram
+                tflite_model,
+                target,
+                delegation_tag,
+                fetch_constants_to_sram,
             )
 
-            # Dump the tflite file if logging level is enabled
-            if logging.root.isEnabledFor(logging.DEBUG):
-                import os
-
+            # Dump the tflite file if intermediates_dir is set
+            if intermediates_dir != "None":
                 logging.debug(
-                    f"Serializing converted graph with tag {delegation_tag} to {os.getcwd()}"
+                    f"Serializing converted graph with tag {delegation_tag} to {intermediates_dir}"
                 )
-                with open(f"{delegation_tag}_pure.et.tflite", "wb") as f:
+                with open(
+                    os.path.join(intermediates_dir, f"{delegation_tag}_pure.et.tflite"),
+                    "wb",
+                ) as f:
                     f.write(bytes(tflite_model))
-                with open(f"{delegation_tag}_neutron.et.tflite", "wb") as f:
+                with open(
+                    os.path.join(
+                        intermediates_dir, f"{delegation_tag}_neutron.et.tflite"
+                    ),
+                    "wb",
+                ) as f:
                     f.write(bytes(neutron_model))
 
             binary = PayloadComposer().get_binary_payload(io_formats, neutron_model)

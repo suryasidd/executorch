@@ -9,6 +9,7 @@
 #include <executorch/runtime/executor/method.h>
 
 #include <c10/util/irange.h>
+#include <c10/util/safe_numerics.h>
 #include <array>
 #include <cinttypes> // @donotremove
 #include <cstdint>
@@ -801,8 +802,19 @@ Error Method::resolve_operator(
   }
 
   // Find a kernel with the matching name and tensor meta.
-  Result<OpFunction> op_function =
-      get_op_function_from_registry(operator_name, {meta, count});
+  // Try method-scoped registry first (if provided), then fall back to global.
+  auto resolve_op_function = [&]() -> Result<OpFunction> {
+    if (!kernel_registry_.empty()) {
+      Result<OpFunction> method_scoped_op_function =
+          get_op_function_from_registry(
+              operator_name, {meta, count}, kernel_registry_);
+      if (method_scoped_op_function.ok()) {
+        return method_scoped_op_function;
+      }
+    }
+    return get_op_function_from_registry(operator_name, {meta, count});
+  };
+  Result<OpFunction> op_function = resolve_op_function();
   if (!op_function.ok()) {
     ET_LOG(
         Error,
@@ -830,7 +842,8 @@ Result<Method> Method::load(
     MemoryManager* memory_manager,
     EventTracer* event_tracer,
     const NamedDataMap* external_data_map,
-    const LoadBackendOptionsMap* backend_options) {
+    const LoadBackendOptionsMap* backend_options,
+    Span<const Kernel> kernel_registry) {
   MemoryAllocator* temp_allocator = memory_manager->temp_allocator();
   if (temp_allocator == nullptr) {
     PlatformMemoryAllocator* platform_allocator =
@@ -843,7 +856,8 @@ Result<Method> Method::load(
     new (platform_allocator) PlatformMemoryAllocator();
     temp_allocator = platform_allocator;
   }
-  Method method(program, memory_manager, event_tracer, temp_allocator);
+  Method method(
+      program, memory_manager, event_tracer, temp_allocator, kernel_registry);
   ET_LOG(Debug, "Loading method: %s.", s_plan->name()->c_str());
   Error err = method.init(s_plan, external_data_map, backend_options);
   if (err != Error::Ok) {
@@ -1194,6 +1208,33 @@ Method::set_input(const EValue& input_evalue, size_t input_idx) {
         input_idx,
         executorch::runtime::toString(t_dst.scalar_type()),
         executorch::runtime::toString(t_src.scalar_type()));
+
+    ssize_t numel = 1;
+    for (ssize_t i = 0; i < t_src.dim(); i++) {
+      bool overflow = c10::mul_overflows(
+          numel, static_cast<ssize_t>(t_src.size(i)), &numel);
+      ET_CHECK_OR_RETURN_ERROR(
+          !overflow,
+          InvalidArgument,
+          "Input %" ET_PRIsize_t
+          ": numel overflowed at dimension %zd with size %zd",
+          input_idx,
+          (size_t)i,
+          (size_t)t_src.size(i));
+    }
+    size_t nbytes;
+    bool nbytes_overflow = c10::mul_overflows(
+        static_cast<size_t>(numel),
+        executorch::runtime::elementSize(t_src.scalar_type()),
+        &nbytes);
+    ET_CHECK_OR_RETURN_ERROR(
+        !nbytes_overflow,
+        InvalidArgument,
+        "Input %" ET_PRIsize_t
+        ": nbytes overflowed: numel %zd with element size %zu",
+        input_idx,
+        numel,
+        executorch::runtime::elementSize(t_src.scalar_type()));
     // Reset the shape for the Method's input as the size of forwarded input
     // tensor for shape dynamism. Also is a safety check if need memcpy.
     ET_CHECK_OK_OR_RETURN_ERROR(
@@ -1538,17 +1579,16 @@ Error Method::execute_instruction() {
       // We know that instr_args_as_FreeCall is non-null because it was checked
       // at init time.
       auto free_call = instruction->instr_args_as_FreeCall();
-      auto& val = mutable_value(free_call->value_index());
-      if (val.isTensor()) {
-        auto& t = val.toTensor();
-        internal::reset_data_ptr(t);
-      } else {
+      auto t = mutable_value(free_call->value_index()).tryToTensor();
+      if (!t.ok()) {
         ET_LOG(
             Error,
             "FreeCall target at index %u is not a Tensor",
             static_cast<unsigned int>(free_call->value_index()));
-        err = Error::InvalidProgram;
+        err = t.error();
+        break;
       }
+      internal::reset_data_ptr(t.get());
     } break;
     default:
       ET_LOG(

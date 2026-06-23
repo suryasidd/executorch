@@ -16,6 +16,7 @@ import java.nio.ByteOrder
 import org.apache.commons.io.FileUtils
 import org.json.JSONException
 import org.json.JSONObject
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -49,6 +50,13 @@ class LlmModuleInstrumentationTest : LlmCallback {
 
     llmModule =
         LlmModule(getTestFilePath(TEST_FILE_NAME), getTestFilePath(TOKENIZER_FILE_NAME), 0.0f)
+  }
+
+  @After
+  fun tearDown() {
+    if (::llmModule.isInitialized) {
+      llmModule.close()
+    }
   }
 
   @Test
