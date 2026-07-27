@@ -1,4 +1,5 @@
 # Copyright 2025-2026 Arm Limited and/or its affiliates.
+# Copyright 2026 Arm Limited and/or its affiliates.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
@@ -213,17 +214,17 @@ def test_copy_failure_artifacts_copies_tosa_without_tag_name(tmp_path):
 
 
 @mock.patch("executorch.backends.arm.vgf.backend.model_converter_env")
-@mock.patch("executorch.backends.arm.vgf.backend.require_model_converter_binary")
+@mock.patch("executorch.backends.arm.vgf.backend.require_model_converter_executable")
 @mock.patch("executorch.backends.arm.vgf.backend.subprocess.run")
 def test_vgf_compile_failure_includes_repro_command_and_copies_tosa(
     mock_run,
-    mock_require_model_converter_binary,
+    mock_require_model_converter_executable,
     mock_model_converter_env,
     tmp_path,
 ):
     artifact_path = tmp_path / "artifacts"
 
-    mock_require_model_converter_binary.return_value = "model-converter"
+    mock_require_model_converter_executable.return_value = "model-converter"
     mock_model_converter_env.return_value = {"PATH": "/test/bin"}
     mock_run.side_effect = backend.subprocess.CalledProcessError(
         returncode=1,
@@ -259,14 +260,14 @@ def test_vgf_compile_failure_includes_repro_command_and_copies_tosa(
 
 
 @mock.patch("executorch.backends.arm.vgf.backend.model_converter_env")
-@mock.patch("executorch.backends.arm.vgf.backend.require_model_converter_binary")
+@mock.patch("executorch.backends.arm.vgf.backend.require_model_converter_executable")
 @mock.patch("executorch.backends.arm.vgf.backend.subprocess.run")
 def test_vgf_compile_failure_includes_temp_repro_command_without_artifact_path(
     mock_run,
-    mock_require_model_converter_binary,
+    mock_require_model_converter_executable,
     mock_model_converter_env,
 ):
-    mock_require_model_converter_binary.return_value = "model-converter"
+    mock_require_model_converter_executable.return_value = "model-converter"
     mock_model_converter_env.return_value = {"PATH": "/test/bin"}
     mock_run.side_effect = backend.subprocess.CalledProcessError(
         returncode=1,
@@ -289,5 +290,43 @@ def test_vgf_compile_failure_includes_temp_repro_command_without_artifact_path(
     assert "model-converter --some-flag -i" in error
     assert "output_delegate_0.tosa.vgf" in error
     assert "failed_model_converter_input_delegate_0.tosa" not in error
+    assert "Stderr:\nconverter stderr" in error
+    assert "Stdout:\nconverter stdout" in error
+
+
+@mock.patch("executorch.backends.arm.vgf.backend._copy_failure_artifacts")
+@mock.patch("executorch.backends.arm.vgf.backend.model_converter_env")
+@mock.patch("executorch.backends.arm.vgf.backend.require_model_converter_executable")
+@mock.patch("executorch.backends.arm.vgf.backend.subprocess.run")
+def test_vgf_compile_failure_preserves_converter_error_when_artifact_copy_fails(
+    mock_run,
+    mock_require_model_converter_executable,
+    mock_model_converter_env,
+    mock_copy_failure_artifacts,
+    tmp_path,
+):
+    mock_require_model_converter_executable.return_value = "model-converter"
+    mock_model_converter_env.return_value = {"PATH": "/test/bin"}
+    mock_copy_failure_artifacts.side_effect = PermissionError("cannot copy artifact")
+    mock_run.side_effect = backend.subprocess.CalledProcessError(
+        returncode=1,
+        cmd=["model-converter"],
+        output=b"converter stdout",
+        stderr=b"converter stderr",
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        vgf_compile(
+            b"serialized tosa",
+            ["--some-flag"],
+            artifact_path=str(tmp_path / "artifacts"),
+            tag_name="delegate_0",
+        )
+
+    error = str(exc_info.value)
+    assert "Vgf compiler failed." in error
+    assert "Repro command:" in error
+    assert "Failure artifact copy failed:" in error
+    assert "cannot copy artifact" in error
     assert "Stderr:\nconverter stderr" in error
     assert "Stdout:\nconverter stdout" in error
