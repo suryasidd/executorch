@@ -37,6 +37,15 @@ class OpenvinoOperatorsSupport(OperatorSupportBase):
     extended_support_dict = {
         "torch.ops.dim_order_ops._clone_dim_order.default": None,
         "torch.ops.dim_order_ops._to_dim_order_copy.default": None,
+        # The frontend translates these (op_table.cpp) but they are missing from
+        # its generated support list. Claiming them keeps quantized linears
+        # inside the partition instead of fragmenting the graph around every
+        # weight.
+        "torch.ops.torchao.dequantize_int4_tensor.default": None,
+        "torch.ops.torchao.dequantize_affine.default": None,
+        # Same, and lets ops_to_not_decompose keep rms_norm fused rather than
+        # expanded to pow/mean/rsqrt in fp32.
+        "torch.ops.aten.rms_norm.default": None,
     }
 
     def __init__(
@@ -140,6 +149,11 @@ class OpenvinoPartitioner(Partitioner):
             torch.ops.aten.upsample_nearest2d.default,
             torch.ops.aten.upsample_nearest2d.vec,
             torch.ops.aten.stack.default,
+            torch.ops.aten.rms_norm.default,
+            # KV-cache writes. Decomposing to index_put costs ~15 ops per write
+            # (NonZero/Mod/Transpose/...) for indexing a cache never uses;
+            # index_copy translates straight to ScatterElementsUpdate.
+            torch.ops.aten.index_copy.default,
         ]
         return (ops_not_decompose, None)
 

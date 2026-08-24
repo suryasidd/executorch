@@ -6,7 +6,11 @@
 
 # mypy: disable-error-code=import-not-found
 
+import copy
+import gc
 from typing import final, List
+
+import torch
 
 from executorch.backends.openvino._passes import DecomposeFloorDividePass
 
@@ -24,6 +28,35 @@ from openvino.frontend.pytorch.torchdynamo.compile import (  # type: ignore[impo
 
 @final
 class OpenvinoBackend(BackendDetails):
+
+    @classmethod
+    def copy_exported_program_for_preprocess(
+        cls,
+        edge_program: ExportedProgram,
+        compile_specs: List[CompileSpec],
+    ) -> ExportedProgram:
+        """Isolate the graph ``preprocess`` mutates without copying weights.
+
+        The default deepcopies the whole program, weights included. The passes
+        below only rewrite graph nodes, so an independent ``fx.Graph`` over the
+        same root module is enough; ``GraphModule(root, graph)`` re-registers
+        parameters by reference.
+        """
+        graph_module = edge_program.graph_module
+        isolated_root = torch.fx.GraphModule(
+            graph_module, copy.deepcopy(graph_module.graph)
+        )
+        return ExportedProgram(
+            root=isolated_root,
+            graph=isolated_root.graph,
+            graph_signature=copy.deepcopy(edge_program.graph_signature),
+            state_dict=edge_program.state_dict,
+            range_constraints=copy.deepcopy(edge_program.range_constraints),
+            module_call_graph=copy.deepcopy(edge_program.module_call_graph),
+            example_inputs=edge_program.example_inputs,
+            constants=edge_program.constants,
+            verifiers=[edge_program.verifier],
+        )
 
     @classmethod
     def preprocess(
@@ -58,5 +91,10 @@ class OpenvinoBackend(BackendDetails):
             edge_program.module(), *args, options=compile_options
         )
         model_bytes = compiled.export_model()
+
+        # Drop the compiled model's copy of the weights; only the bytes are
+        # needed from here.
+        del compiled
+        gc.collect()
 
         return PreprocessResult(processed_bytes=model_bytes.getvalue())

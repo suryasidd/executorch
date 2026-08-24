@@ -65,7 +65,7 @@ def load_and_quantize(
 # Backend dispatch helpers
 
 
-_SUPPORTED_BACKENDS = ("cuda", "mlx")
+_SUPPORTED_BACKENDS = ("cuda", "mlx", "openvino")
 
 
 # Export + lower
@@ -107,6 +107,14 @@ def export_and_lower(
             vision_model=vision_model,
             pos_embed_table=pos_embed_table,
             max_vision_patches=max_vision_patches,
+        )
+    elif backend == "openvino":
+        _export_openvino(
+            model,
+            config,
+            output_dir,
+            activation_dtype=activation_dtype,
+            max_prefill_chunk=max_prefill_chunk,
         )
     else:
         raise ValueError(
@@ -506,6 +514,142 @@ def _export_mlx(
     print("Done.")
 
 
+def _export_openvino(
+    model: MuseGlimmerModel,
+    config: MuseGlimmerConfig,
+    output_dir: str,
+    activation_dtype: torch.dtype = torch.bfloat16,
+    max_prefill_chunk: int = 512,
+    device: str = "CPU",
+) -> None:
+    """Export to .pte via torch.export + the OpenVINO backend (CPU/GPU/NPU).
+
+    No source transformation needed: the stock model lowers whole-graph, with
+    only ``getitem`` left outside the delegate. Exports the same two methods as
+    MLX so the runners' contract is unchanged:
+
+        embed_text(tokens)                    -> embeddings
+        forward_from_embeddings(embeds, pos)  -> logits
+
+    Vision is not wired up here. GGUF weights are repacked to
+    ``ExportableInt4Tensor``/``IntxUnpackedToInt8Tensor`` by
+    ``checkpoint_loader._finalize`` before this runs.
+    """
+    import gc
+
+    from executorch.backends.openvino.partitioner import OpenvinoPartitioner
+    from executorch.exir import (
+        EdgeCompileConfig,
+        EdgeProgramManager,
+        ExecutorchBackendConfig,
+        to_edge_transform_and_lower,
+    )
+    from executorch.exir.backend.compile_spec_schema import CompileSpec
+    from executorch.exir.passes import MemoryPlanningPass
+    from torch.export import Dim, export
+
+    max_prefill = max_prefill_chunk
+    materialize_runtime_buffers(model, dtype=activation_dtype)
+    model.to(activation_dtype)
+    mutable_buffer_metadata = common.mutable_buffer_metadata(model)
+
+    programs: dict[str, "torch.export.ExportedProgram"] = {}
+    hidden = config.dim
+
+    embed_seq = Dim("embed_seq_len", min=1, max=max_prefill)
+    seq_dim = Dim("seq_len", min=1, max=max_prefill)
+    example_inputs = {
+        "embed_text": (torch.zeros((1, max_prefill), dtype=torch.long),),
+        "forward_from_embeddings": (
+            torch.zeros((1, max_prefill, hidden), dtype=activation_dtype),
+            torch.arange(max_prefill, dtype=torch.long),
+        ),
+    }
+    dynamic_shapes = {
+        "embed_text": ({1: embed_seq},),
+        "forward_from_embeddings": ({1: seq_dim}, {0: seq_dim}),
+    }
+
+    print(f"Exporting embed_text (T in [1, {max_prefill}])...")
+    with common.BoundMethodForward(model, model.embed_text), torch.no_grad():
+        programs["embed_text"] = export(
+            model,
+            example_inputs["embed_text"],
+            dynamic_shapes=dynamic_shapes["embed_text"],
+            strict=True,
+        )
+
+    print(f"Exporting forward_from_embeddings (T in [1, {max_prefill}])...")
+    with common.BoundMethodForward(
+        model, model.prefill_from_embeds
+    ), torch.no_grad():
+        programs["forward_from_embeddings"] = export(
+            model,
+            example_inputs["forward_from_embeddings"],
+            dynamic_shapes=dynamic_shapes["forward_from_embeddings"],
+            strict=True,
+        )
+
+    del model
+    gc.collect()
+
+    constant_methods = _solo_constant_methods(
+        config=config,
+        max_prefill=max_prefill,
+        activation_dtype=activation_dtype,
+        mutable_buffer_metadata=mutable_buffer_metadata,
+        has_vision=False,
+        max_vision_patches=0,
+    )
+    constant_methods["use_sampling"] = False
+
+    print(
+        f"Lowering {len(programs)} method(s) to ExecuTorch (OpenVINO/{device}): "
+        f"{', '.join(programs.keys())}..."
+    )
+    specs = [CompileSpec("device", device.encode())]
+    edge_compile_config = EdgeCompileConfig(
+        _check_ir_validity=False,
+        _skip_dim_order=True,
+    )
+
+    # One method at a time: a batched call holds every method's edge graph and
+    # CompiledModel at once. Largest method first, sorted descending.
+    lowered: dict[str, "torch.export.ExportedProgram"] = {}
+    for name in sorted(programs, reverse=True):
+        edge_manager = to_edge_transform_and_lower(
+            {name: programs.pop(name)},
+            partitioner=[OpenvinoPartitioner(specs)],
+            compile_config=edge_compile_config,
+        )
+        lowered[name] = edge_manager._edge_programs[name]
+        del edge_manager
+        gc.collect()
+
+    del programs
+    gc.collect()
+
+    et_prog = EdgeProgramManager(lowered, constant_methods, edge_compile_config)
+    del lowered
+    gc.collect()
+
+    et_program = et_prog.to_executorch(
+        config=ExecutorchBackendConfig(
+            extract_delegate_segments=True,
+            memory_planning_pass=MemoryPlanningPass(
+                alloc_graph_input=False,
+                share_mutable_buffers=True,
+            ),
+            emit_mutable_buffer_names=True,
+        ),
+    )
+    del et_prog
+    gc.collect()
+
+    common.save_pte(et_program, output_dir, None)
+    print("Done.")
+
+
 def main() -> None:
     from executorch.examples.models.muse_glimmer.loaders.quantize_and_save import (
         RECIPE_NAMES,
@@ -574,18 +718,18 @@ def main() -> None:
         "--activation-dtype",
         default=None,
         choices=list(common.ACTIVATION_DTYPES),
-        help="Activation compute dtype (MLX backend only). Defaults to 'float16' "
-        "for --backend mlx and 'bfloat16' otherwise. For 'float16' the KV cache "
-        "and all unquantized weights/buffers are converted to fp16 too.",
+        help="Activation compute dtype (MLX and OpenVINO backends). Defaults to "
+        "'float16' for --backend mlx and 'bfloat16' otherwise. For 'float16' the "
+        "KV cache and all unquantized weights/buffers are converted to fp16 too.",
     )
     parser.add_argument(
         "--max-prefill-chunk",
         type=int,
         default=512,
-        help="Max prefill chunk size (MLX backend only): the largest number of "
-        "tokens processed per prefill forward, and the dynamic seq_len upper "
-        "bound baked into the .pte (get_max_prefill_chunk). Larger values improve "
-        "prefill GPU utilization/throughput at the cost of more memory. "
+        help="Max prefill chunk size (MLX and OpenVINO backends): the largest "
+        "number of tokens processed per prefill forward, and the dynamic seq_len "
+        "upper bound baked into the .pte (get_max_prefill_chunk). Larger values "
+        "improve prefill GPU utilization/throughput at the cost of more memory. "
         "Default 512.",
     )
     parser.add_argument(
@@ -619,10 +763,15 @@ def main() -> None:
     if args.activation_dtype is None:
         args.activation_dtype = "float16" if args.backend == "mlx" else "bfloat16"
     activation_dtype = common.ACTIVATION_DTYPES[args.activation_dtype]
-    if args.backend != "mlx" and activation_dtype != torch.bfloat16:
-        parser.error("--activation-dtype is only supported with --backend mlx.")
-    if args.backend != "mlx" and args.max_prefill_chunk != 512:
-        parser.error("--max-prefill-chunk is only supported with --backend mlx.")
+    _CHUNKED_BACKENDS = ("mlx", "openvino")
+    if args.backend not in _CHUNKED_BACKENDS and activation_dtype != torch.bfloat16:
+        parser.error(
+            "--activation-dtype is only supported with --backend mlx or openvino."
+        )
+    if args.backend not in _CHUNKED_BACKENDS and args.max_prefill_chunk != 512:
+        parser.error(
+            "--max-prefill-chunk is only supported with --backend mlx or openvino."
+        )
     if args.gguf:
         from executorch.examples.models.muse_glimmer.loaders.checkpoint_loader import (
             load_gguf_model,

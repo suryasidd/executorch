@@ -13,6 +13,7 @@ same backend-packing path.
 
 from __future__ import annotations
 
+import gc
 import os
 import re
 
@@ -321,6 +322,13 @@ _FUSION_GROUPS: dict[str, dict[str, list[str]]] = {
             "layers.{}.mlp.up_proj.weight",
         ],
     },
+    # No fused-QKV kernel preference; same minimal layout as MLX.
+    "openvino": {
+        "layers.{}.mlp.gate_up_proj.weight": [
+            "layers.{}.mlp.gate_proj.weight",
+            "layers.{}.mlp.up_proj.weight",
+        ],
+    },
 }
 
 
@@ -480,6 +488,14 @@ def _finalize(atomic_sd: dict, backend: str, config, activation_dtype: torch.dty
     # Weights are already in portable form; assign directly (convert=identity).
     assign_state_dict(model, fused_sd, convert=identity)
 
+    # The model owns the weights now; neither dict is read past this point.
+    # Holding them across packing would keep every original and its repacked
+    # copy resident at once.
+    fused_sd.clear()
+    atomic_sd.clear()
+    del fused_sd, atomic_sd
+    gc.collect()
+
     if backend == "cuda":
         from executorch.examples.models.gemma4_31b.cuda_packers import (
             convert_quantized_tensors_for_cuda,
@@ -487,6 +503,14 @@ def _finalize(atomic_sd: dict, backend: str, config, activation_dtype: torch.dty
 
         print("Converting quantized tensors for CUDA...")
         convert_quantized_tensors_for_cuda(model)
+    elif backend == "openvino":
+        from executorch.examples.models.muse_glimmer.loaders.openvino_gguf_packers import (
+            convert_quantized_tensors_for_openvino,
+        )
+
+        print("Converting quantized tensors for OpenVINO...")
+        stats = convert_quantized_tensors_for_openvino(model, activation_dtype)
+        print(f"  {stats}")
 
     materialize_runtime_buffers(model, dtype=activation_dtype)
     model.eval()
@@ -495,8 +519,10 @@ def _finalize(atomic_sd: dict, backend: str, config, activation_dtype: torch.dty
 
 
 def _validate_backend(backend: str) -> None:
-    if backend not in ("cuda", "mlx"):
-        raise ValueError(f"Unsupported backend: {backend!r}. Supported: 'cuda', 'mlx'.")
+    if backend not in ("cuda", "mlx", "openvino"):
+        raise ValueError(
+            f"Unsupported backend: {backend!r}. Supported: 'cuda', 'mlx', 'openvino'."
+        )
 
 
 # mmproj (vision encoder) loading.

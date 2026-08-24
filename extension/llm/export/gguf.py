@@ -374,13 +374,19 @@ class ExportableGGUFTensor(TorchAOBaseTensor):
         )
 
     def to_exportable_int4_tensor(
-        self, output_dtype: Optional[torch.dtype] = None
+        self,
+        output_dtype: Optional[torch.dtype] = None,
+        scale_dtype: Optional[torch.dtype] = None,
     ) -> Tensor:
         """Convert a Q4_K tensor to an ``ExportableInt4Tensor``.
 
         Threads ``output_dtype`` (default ``orig_dtype``) into the scale/zero_point
         and the dequantized output dtype, so callers targeting fp16 (e.g. MLX) get
         fp16 params while CUDA can pass bf16. The packed int nibbles are unchanged.
+
+        ``scale_dtype`` sets the stored scale/zero_point width independently of
+        ``output_dtype``, matching ``to_intx_unpacked_to_int8_tensor``. Defaults
+        to ``output_dtype``.
         """
         from executorch.extension.llm.export.int4 import ExportableInt4Tensor
 
@@ -389,6 +395,7 @@ class ExportableGGUFTensor(TorchAOBaseTensor):
                 f"to_exportable_int4_tensor only supports q4_k; got {self.ggml_type!r}"
             )
         dtype = output_dtype or self.orig_dtype
+        sdt = scale_dtype or dtype
         N, K = int(self.shape[0]), int(self.shape[1])
         q, eff_scale, eff_min = _q4_k_fields(self.raw, N, K)
 
@@ -400,8 +407,8 @@ class ExportableGGUFTensor(TorchAOBaseTensor):
         return ExportableInt4Tensor(
             packed,
             # ExportableInt4Tensor scale/zero layout is (K // gs, N) -- transposed.
-            eff_scale.to(dtype).t().contiguous(),
-            zero.to(dtype).t().contiguous(),
+            eff_scale.to(sdt).t().contiguous(),
+            zero.to(sdt).t().contiguous(),
             Q4_K_GROUP_SIZE,
             dtype,
         )
