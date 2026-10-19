@@ -9,6 +9,8 @@ set -ex
 
 # shellcheck source=/dev/null
 source "$(dirname "${BASH_SOURCE[0]}")/utils.sh"
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/openvino-utils.sh"
 
 # Parse arguments
 USE_NIGHTLY=false
@@ -18,32 +20,19 @@ for arg in "$@"; do
   esac
 done
 
-# Download and install OpenVINO from release packages
-OPENVINO_VERSION="2026.0"
-OPENVINO_BUILD="2026.0.0.20965.c6d6a13a886"
-OPENVINO_STABLE_URL="https://storage.openvinotoolkit.org/repositories/openvino/packages/${OPENVINO_VERSION}/linux/openvino_toolkit_ubuntu22_${OPENVINO_BUILD}_x86_64.tgz"
-
-OPENVINO_NIGHTLY_BUILD_ID="2026.1.0-21310-c694fbc2b6d"
-OPENVINO_NIGHTLY_BUILD="2026.1.0.dev20260312"
-OPENVINO_NIGHTLY_URL="https://storage.openvinotoolkit.org/repositories/openvino/packages/nightly/${OPENVINO_NIGHTLY_BUILD_ID}/openvino_toolkit_ubuntu22_${OPENVINO_NIGHTLY_BUILD}_x86_64.tgz"
+OPENVINO_VERSION="2026.4.1"
+OPENVINO_NIGHTLY_VERSION="2026.5.0.dev20261019"
 
 if [ "${USE_NIGHTLY}" = true ]; then
-  OPENVINO_URL="${OPENVINO_NIGHTLY_URL}"
-  OPENVINO_EXTRACTED_DIR="openvino_toolkit_ubuntu22_${OPENVINO_NIGHTLY_BUILD}_x86_64"
-  echo "Using OpenVINO nightly build: ${OPENVINO_NIGHTLY_BUILD_ID}"
+  echo "Using OpenVINO nightly build: ${OPENVINO_NIGHTLY_VERSION}"
+  pip install --pre "openvino==${OPENVINO_NIGHTLY_VERSION}" --extra-index-url https://storage.openvinotoolkit.org/simple/wheels/nightly
 else
-  OPENVINO_URL="${OPENVINO_STABLE_URL}"
-  OPENVINO_EXTRACTED_DIR="openvino_toolkit_ubuntu22_${OPENVINO_BUILD}_x86_64"
-  echo "Using OpenVINO stable release: ${OPENVINO_BUILD}"
+  echo "Using OpenVINO stable release: ${OPENVINO_VERSION}"
+  pip install "openvino==${OPENVINO_VERSION}"
 fi
 
-curl -Lo /tmp/openvino_toolkit.tgz --retry 3 --retry-all-errors --fail ${OPENVINO_URL}
-tar -xzf /tmp/openvino_toolkit.tgz
-mv "${OPENVINO_EXTRACTED_DIR}" openvino
+export_openvino_lib_path
 
-set +u
-source openvino/setupvars.sh
-set -u
 pip install -r backends/openvino/requirements.txt
 pushd backends/openvino/scripts
 ./openvino_build.sh --enable_python

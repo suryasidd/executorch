@@ -9,6 +9,8 @@ set -ex
 
 # shellcheck source=/dev/null
 source "$(dirname "${BASH_SOURCE[0]}")/utils.sh"
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/openvino-utils.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -76,13 +78,11 @@ if [[ "${MODE}" =~ .*openvino.* ]]; then
   OPENVINO=ON
   TARGET_LIBS="$TARGET_LIBS openvino_backend "
 
-  # Install specific OpenVINO runtime from pip.
-  $PYTHON_EXECUTABLE -m pip install --pre openvino==2026.1.0.dev20260131 --extra-index-url https://storage.openvinotoolkit.org/simple/wheels/nightly
+  # Install OpenVINO runtime release from pip.
+  $PYTHON_EXECUTABLE -m pip install openvino==2026.4.1
   $PYTHON_EXECUTABLE -m pip install -r backends/openvino/requirements.txt
 
-  # Set OPENVINO_LIB_PATH so the C++ demo runner can also find libopenvino_c.so.
-  OPENVINO_LIB_PATH=$($PYTHON_EXECUTABLE -c "import openvino, os, glob; print(sorted(glob.glob(os.path.join(os.path.dirname(openvino.__file__), 'libs', 'libopenvino_c.so*')))[-1])")
-  export OPENVINO_LIB_PATH
+  export_openvino_lib_path
 else
   OPENVINO=OFF
 fi

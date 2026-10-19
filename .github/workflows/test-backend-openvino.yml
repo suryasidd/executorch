@@ -12,6 +12,9 @@ on:
     paths:
       - .github/workflows/test-backend-openvino.yml
       - .github/workflows/_test_backend.yml
+      - .ci/scripts/setup-openvino.sh
+      - .ci/scripts/openvino-utils.sh
+      - .ci/scripts/test_backend.sh
   workflow_dispatch:
 
 concurrency:
