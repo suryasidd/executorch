@@ -25,6 +25,12 @@ def test_annotate_avg_pool1d(request, kwargs):
 
 @enumerate_backends_quantized()
 @repack_pass_fixtures
+def test_annotate_get_attr(request, kwargs):
+    AnnotateGetAttr.test(request, kwargs)  # noqa: F405
+
+
+@enumerate_backends_quantized()
+@repack_pass_fixtures
 def test_annotate_quant_attrs(request, kwargs):
     AnnotateQuantAttrs.test(request, kwargs)  # noqa: F405
 
@@ -307,6 +313,12 @@ def test_fold_qdq(request, kwargs):
     FoldQDQ.test(request, kwargs)  # noqa: F405
 
 
+@enumerate_backends()
+@repack_pass_fixtures
+def test_fuse_batch_norm_with_conv(request, kwargs):
+    FuseBatchNormWithConv.test(request, kwargs)  # noqa: F405
+
+
 # Test case tests pytorch dtype conversion,
 # since LPAI only supports quant type casting, skip LPAI for now.
 @enumerate_backends(
@@ -318,6 +330,12 @@ def test_fold_qdq(request, kwargs):
 @repack_pass_fixtures
 def test_fuse_consecutive_cast(request, kwargs):
     FuseConsecutiveCast.test(request, kwargs)  # noqa: F405
+
+
+@enumerate_backends()
+@repack_pass_fixtures
+def test_fuse_consecutive_reshape(request, kwargs):
+    FuseConsecutiveReshape.test(request, kwargs)  # noqa: F405
 
 
 @enumerate_backends()
@@ -354,6 +372,12 @@ def test_lift_constant_scalar_operands(request, kwargs):
 @repack_pass_fixtures
 def test_lpai_partition_fallback_support(request, kwargs):
     LpaiPartitionFallbackSupport.test(request, kwargs)  # noqa: F405
+
+
+@enumerate_backends([QnnExecuTorchBackendType.kHtpBackend])
+@repack_pass_fixtures
+def test_recompose_hadamard(request, kwargs):
+    RecomposeHadamard.test(request, kwargs)  # noqa: F405
 
 
 @enumerate_backends()

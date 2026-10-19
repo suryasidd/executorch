@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 import unittest
 from collections import namedtuple
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import torch
@@ -28,6 +30,7 @@ from executorch.backends.native.serialization.graph_serialize import (
     _node_outputs,
     _output_alias_of,
     _to_arg_value,
+    collect_data_keys,
     serialize_operator,
 )
 from executorch.backends.native.serialization.schema import (
@@ -83,6 +86,13 @@ class _Counter(nn.Module):
         return x + self.count
 
 
+@dataclass
+class _NodeWithArgument(Node):
+    """Models an append-only schema evolution with a new argument-bearing field."""
+
+    extra_argument: Argument | None = None
+
+
 class _KVCache(nn.Module):
     # A non-persistent (not saved in state_dict) mutable buffer, like a KV cache.
     def __init__(self):
@@ -92,6 +102,15 @@ class _KVCache(nn.Module):
     def forward(self, x):
         self.cache.add_(x)
         return self.cache + 1.0
+
+
+class _ReadOnlyNonPersistentBuffer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("table", torch.arange(4), persistent=False)
+
+    def forward(self, x):
+        return x + self.table
 
 
 _ADD_INPUTS = (torch.randn(2, 3), torch.randn(2, 3))
@@ -110,6 +129,7 @@ def _roundtrip(model, example_inputs, dynamic_shapes=None) -> _Round:
         edge_ep.graph_signature,
         edge_ep.state_dict,
         edge_ep.constants,
+        edge_ep.range_constraints,
     )
     method = deserialize_program(data).methods[0]
     # Baseline invariants asserted for every roundtrip so each test starts from a
@@ -201,6 +221,14 @@ class SerializeRoundTripTest(unittest.TestCase):
         self.assertTrue(any("bias" in f for f in fqns))
         # Raw data is returned separately, keyed by the same fqns.
         self.assertEqual(set(r.constants.keys()), fqns)
+
+    def test_read_only_non_persistent_buffer_is_shipped(self):
+        r = _roundtrip(_ReadOnlyNonPersistentBuffer(), (torch.zeros(4),))
+        self.assertIn("table", {c.data_key for c in r.method.constants})
+        self.assertNotIn(
+            "table", {buffer.fqn for buffer in r.method.mutable_buffers or []}
+        )
+        self.assertTrue(torch.equal(torch.arange(4), r.constants["table"]))
 
     def test_tensor_args_reference_by_name(self):
         graph = _roundtrip(_Add(), _ADD_INPUTS).graph
@@ -485,6 +513,21 @@ class DynamicShapeTest(unittest.TestCase):
         self.assertTrue(any(r for r in il.refs))
         self.assertTrue(any(not r for r in il.refs))
 
+    def test_dynamic_dim_keeps_declared_min(self):
+        class M(torch.nn.Module):
+            def forward(self, x):
+                return torch.cat([x, x]) * 2
+
+        graph = _roundtrip(
+            M(),
+            (torch.randn(4),),
+            dynamic_shapes={"x": {0: torch.export.Dim("b", min=1, max=16)}},
+        ).graph
+        ranges = {
+            (d.min, d.max) for tv in graph.tensor_values or [] for d in tv.meta.sizes
+        }
+        self.assertEqual(ranges, {(1, 16), (2, 32)})
+
     def test_dynamic_dim_not_frozen_in_tensor_meta(self):
         # int(sym) would specialize to the hint and freeze the dim; TensorMeta must
         # keep it as a range (min != max), not a single concrete value.
@@ -545,10 +588,9 @@ class DimOrderTest(unittest.TestCase):
         self.assertEqual(_dim_order(t), [0, 2, 1])
 
     def test_channels_last_with_size_one_channel(self):
-        # channels-last leaves the size-1 channel with an arbitrary stride, which
-        # must not be treated as a non-expressible layout.
+        # A size-1 channel must not make channels-last non-expressible.
         t = torch.randn(2, 1, 3, 4).to(memory_format=torch.channels_last)
-        self.assertEqual(_dim_order(t), [0, 2, 1, 3])
+        self.assertEqual(_dim_order(t), [0, 2, 3, 1])
 
     def test_sliced_layout_raises(self):
         t = torch.randn(4, 8)[:, :4]
@@ -658,6 +700,36 @@ class SubgraphHOPTest(unittest.TestCase):
         # Inlined subgraphs must themselves be self-contained (references resolve,
         # I/O has tensor metadata); validate recurses into every GraphArg.
         self.assertIsNone(validate_graph(self._cond_program()))
+
+    def test_collect_data_keys_finds_graph_arg_in_any_node_field(self):
+        quant = QuantSpec(
+            scheme=AffineGroup(
+                scale_data_key="nested.scale",
+                scale_dtype=ScalarType.HALF,
+                quant_min=-8,
+                quant_max=7,
+                zero_point_data_key="nested.zero_point",
+            )
+        )
+        nested = Graph(
+            nodes=[],
+            tensor_values=[
+                TensorValue(
+                    name="nested",
+                    meta=TensorMeta(dtype=ScalarType.CHAR, sizes=[], quant=quant),
+                )
+            ],
+        )
+        node = _NodeWithArgument(
+            name="future_hop",
+            op_kind=OpKind.CALL_FUNCTION,
+            extra_argument=Argument(value=GraphArg(name="body", graph=nested)),
+        )
+        program = Program(methods=[Method(name="forward", graph=Graph(nodes=[node]))])
+
+        self.assertEqual(
+            collect_data_keys(program), {"nested.scale", "nested.zero_point"}
+        )
 
     def test_cond_symbool_predicate_is_bool_ref(self):
         class M(nn.Module):
@@ -1025,3 +1097,51 @@ class ArgValueDispatchTest(unittest.TestCase):
         self.assertIsInstance(v, OptionalTensorListArg)
         self.assertEqual(v.names, ["a", ""])
         self.assertEqual(v.has_value, [True, False])
+
+
+class NonFiniteFloatRoundTripTest(unittest.TestCase):
+    """flatc emits non-finite doubles as bare `inf`/`-inf`/`nan`, which Python's
+    json module rejects."""
+
+    def _roundtrip_values(self, values):
+        node = Node(
+            name="n",
+            op_kind=OpKind.CALL_FUNCTION,
+            target="torch.ops.aten.eq.Scalar",
+            inputs=[
+                NamedArgument(name=f"a{i}", arg=Argument(value=v))
+                for i, v in enumerate(values)
+            ],
+            outputs=[Output(name="n")],
+        )
+        graph = Graph(nodes=[node])
+        program = Program(version="1", methods=[Method(name="forward", graph=graph)])
+        out = deserialize_program(_compile_to_bytes(program))
+        return [na.arg.value for na in (out.methods[0].graph.nodes[0].inputs or [])]
+
+    def test_non_finite_float_args_roundtrip(self):
+        values = self._roundtrip_values(
+            [
+                FloatArg(value=float("-inf")),
+                FloatArg(value=float("inf")),
+                FloatArg(value=float("nan")),
+            ]
+        )
+        self.assertEqual(values[0].value, float("-inf"))
+        self.assertEqual(values[1].value, float("inf"))
+        self.assertTrue(math.isnan(values[2].value))
+
+    def test_non_finite_float_list_roundtrips(self):
+        [value] = self._roundtrip_values(
+            [FloatListArg(values=[1.0, float("inf"), float("-inf"), float("nan")])]
+        )
+        self.assertIsInstance(value, FloatListArg)
+        self.assertEqual(value.values[0], 1.0)
+        self.assertEqual(value.values[1], float("inf"))
+        self.assertEqual(value.values[2], float("-inf"))
+        self.assertTrue(math.isnan(value.values[3]))
+
+    def test_string_arg_containing_inf_preserved(self):
+        [value] = self._roundtrip_values([StringArg(value="inf")])
+        self.assertIsInstance(value, StringArg)
+        self.assertEqual(value.value, "inf")

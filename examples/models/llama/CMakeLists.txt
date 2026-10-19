@@ -37,8 +37,6 @@ cmake_dependent_option(
   "NOT EXECUTORCH_BUILD_ARM_BAREMETAL" OFF
 )
 
-option(EXECUTORCH_BUILD_KERNELS_TORCHAO_MPS "Build the torchao MPS kernels" OFF)
-
 if(NOT PYTHON_EXECUTABLE)
   set(PYTHON_EXECUTABLE python3)
 endif()
@@ -129,22 +127,6 @@ if(TARGET torchao_ops_executorch)
   list(APPEND link_libraries torchao_ops_executorch)
 endif()
 
-if(EXECUTORCH_BUILD_KERNELS_TORCHAO_MPS)
-  # Currently only enable this on Arm-based Macs
-  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SYSTEM_PROCESSOR STREQUAL
-                                             "arm64"
-  )
-    if(EXECUTORCH_BUILD_MPS)
-      add_subdirectory(
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../../third-party/ao/torchao/experimental/ops/mps
-        ${CMAKE_CURRENT_BINARY_DIR}/../../../third-party/ao/torchao/experimental/ops/mps
-      )
-      executorch_target_link_options_shared_lib(torchao_ops_mps_executorch)
-      list(APPEND link_libraries torchao_ops_mps_executorch)
-    endif()
-  endif()
-endif()
-
 set(XNNPACK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../backends/xnnpack)
 # Extra compile option and include dir for pthreadpool
 if(EXECUTORCH_BUILD_PTHREADPOOL)
@@ -195,20 +177,6 @@ if(TARGET qnn_executorch_backend)
   endif()
 endif()
 
-# MPS backend
-if(TARGET mpsdelegate)
-  list(
-    APPEND
-    link_libraries
-    mpsdelegate
-    "-framework Foundation"
-    "-weak_framework MetalPerformanceShaders"
-    "-weak_framework MetalPerformanceShadersGraph"
-    "-weak_framework Metal"
-  )
-  executorch_target_link_options_shared_lib(mpsdelegate)
-endif()
-
 # MLX backend
 if(TARGET mlxdelegate)
   list(APPEND link_libraries mlxdelegate mlx)
@@ -233,6 +201,13 @@ if(TARGET coremldelegate)
     "-framework Accelerate"
   )
   executorch_target_link_options_shared_lib(coremldelegate)
+endif()
+
+# Samsung Enn backend
+if(TARGET enn_backend)
+  set(enn_backend_libs enn_backend enn_logging)
+  list(APPEND link_libraries ${enn_backend_libs})
+  executorch_target_link_options_shared_lib(enn_backend)
 endif()
 
 # This one is needed for cpuinfo where it uses android specific log lib

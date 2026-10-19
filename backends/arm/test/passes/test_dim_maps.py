@@ -9,7 +9,7 @@ from typing import cast, Sequence, TypeVar
 import sympy  # type: ignore[import-untyped]
 import torch
 
-from executorch.backends.arm._passes.dim_maps import (
+from executorch.backends.transforms.dim_maps import (
     normalize_view_shape,
     PermuteMap,
     ViewMap,
@@ -585,6 +585,31 @@ def test_permute_map_matches_docstring_reduction_identities() -> None:
         _reduce(x.permute(permutation), target_dims),
         _reduce(x, source_dims).permute(permutation),
     )
+
+
+def test_permute_map_lifts_and_projects_across_rank_changes() -> None:
+    lower_rank = _permute_map([1, 0])
+    assert lower_rank.lift_to_rank([2, 3], 4) == [0, 1, 3, 2]
+    assert lower_rank.lift_to_rank([1, 2], 3) == [0, 2, 1]
+
+    higher_rank = _permute_map([0, 1, 3, 2])
+    assert higher_rank.project_to_axes([2, 3], require_other_axes_preserved=True) == [
+        1,
+        0,
+    ]
+    assert (
+        _permute_map([2, 1, 0, 3]).project_to_axes(
+            [2, 3], require_other_axes_preserved=True
+        )
+        is None
+    )
+    assert (
+        _permute_map([1, 0, 2, 3]).project_to_axes(
+            [2, 3], require_other_axes_preserved=True
+        )
+        is None
+    )
+    assert _permute_map([2, 0, 1]).project_to_axes([1, 2]) == [1, 0]
 
 
 def test_dim_map_randomized_permute_view_swaps_match_bruteforce() -> None:

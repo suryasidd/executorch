@@ -25,6 +25,7 @@ timeout="600"
 etrecord_file=""
 trace_file=""
 semihosting_cwd=""
+semihosting_cmd_line=""
 ethosu_fast=0
 
 help() {
@@ -38,6 +39,7 @@ help() {
     echo "  --etrecord=<FILE>        If ETDump is used you can supply a ETRecord file matching the PTE"
     echo "  --trace_file=<FILE>      File to write PMU trace output to"
     echo "  --semihosting-cwd=<DIR>  Enable target semihosting with this host working directory"
+    echo "  --semihosting-cmd-line=<COMMAND>  Command line passed to a semihosting runner"
     echo "  --fast                   Use fast Ethos-U model simulation for Ethos-U targets"
     exit 0
 }
@@ -53,6 +55,7 @@ for arg in "$@"; do
       --etrecord=*) etrecord_file="${arg#*=}";;
       --trace_file=*) trace_file="${arg#*=}";;
       --semihosting-cwd=*) semihosting_cwd="${arg#*=}";;
+      --semihosting-cmd-line=*) semihosting_cmd_line="${arg#*=}";;
       --fast) ethosu_fast=1;;
       *)
       ;;
@@ -106,6 +109,38 @@ else
 fi
 
 log_file=$(mktemp)
+log_filter='s/\r$//'
+if [[ ${target} == ethos-u55-* ]]; then
+    # Dynamic BMM can trigger this false critical datatype diagnostic.
+    known_u55_diagnostic='^\[critical\]\[u_dut\.u_npu(_simple)?\.u_npu_cc\.u_npu_cc_tsu\.proc\]'
+    known_u55_diagnostic+='\[[0-9]+ ns\] Op=4: Invalid data type, ifm=5 ofm=1$'
+    log_filter+="; /${known_u55_diagnostic}/s/^\[critical\]/[warning]/"
+fi
+
+run_simulation() {
+    local -a pipeline_status
+    local simulation_status
+    local status
+
+    set +e
+    "$@" 2>&1 | sed -E "${log_filter}" | tee "${log_file}"
+    pipeline_status=("${PIPESTATUS[@]}")
+    set -e
+
+    simulation_status=${pipeline_status[0]}
+    for status in "${pipeline_status[@]:1}"; do
+        if [[ ${simulation_status} -eq 0 && ${status} -ne 0 ]]; then
+            simulation_status=${status}
+        fi
+    done
+
+    echo "[${BASH_SOURCE[0]}] Simulation complete, ${simulation_status}"
+    if [[ ${simulation_status} -ne 0 ]]; then
+        echo "[${BASH_SOURCE[0]}] FVP launch or execution failed"
+        rm "${log_file}"
+        exit "${simulation_status}"
+    fi
+}
 
 extra_args_u55=()
 extra_args_u85=()
@@ -139,6 +174,16 @@ if [[ -n "${semihosting_cwd}" ]]; then
         -C "mps4_board.subsystem.cpu0.semihosting-cwd=${semihosting_cwd}"
     )
 fi
+if [[ -n "${semihosting_cmd_line}" ]]; then
+    [[ -n "${semihosting_cwd}" ]] \
+        || { echo "--semihosting-cmd-line requires --semihosting-cwd"; exit 1; }
+    semihosting_args_u55+=(
+        -C "cpu0.semihosting-cmd_line=${semihosting_cmd_line}"
+    )
+    semihosting_args_u85+=(
+        -C "mps4_board.subsystem.cpu0.semihosting-cmd_line=${semihosting_cmd_line}"
+    )
+fi
 
 if [[ ${target} == cortex-m* ]]; then
     [[ -z "${bundle_file}" ]] \
@@ -149,7 +194,7 @@ if [[ ${target} == cortex-m* ]]; then
     # Bundled-IO runner needs -i to point at a real file even though
     # inputs come from the bundle.
     dd if=/dev/zero of="${bundle_dir}/fvp_dummy_input.bin" bs=4 count=1 2>/dev/null
-    ${nobuf} ${fvp_model}                                              \
+    run_simulation ${nobuf} ${fvp_model}                               \
         -C ethosu.num_macs=${num_macs}                                 \
         -C mps3_board.visualisation.disable-visualisation=1            \
         -C mps3_board.telnetterminal0.start_telnet=0                   \
@@ -162,8 +207,7 @@ if [[ ${target} == cortex-m* ]]; then
         -C "ethosu.extra_args=--fast"                                  \
         -C "cpu0.semihosting-cmd_line=executor_runner -m ${bundle_name} -i fvp_dummy_input.bin -o out" \
         -a "${elf_file}"                                               \
-        --timelimit ${timeout} 2>&1 | sed 's/\r$//' | tee ${log_file} || true
-    echo "[${BASH_SOURCE[0]}] Simulation complete, $?"
+        --timelimit ${timeout}
     if grep -q "Test_result: PASS" "${log_file}"; then
         echo "[${BASH_SOURCE[0]}] Bundled I/O check PASSED for ${bundle_name}"
         rm "${log_file}"
@@ -178,7 +222,7 @@ if [[ ${target} == cortex-m* ]]; then
         exit 1
     fi
 elif [[ ${target} == *"ethos-u55"* || ${target} == *"ethos-u65"* ]]; then
-    ${nobuf} ${fvp_model}                                   \
+    run_simulation ${nobuf} ${fvp_model}                    \
         -C ethosu.num_macs=${num_macs}                      \
         -C mps3_board.visualisation.disable-visualisation=1 \
         -C mps3_board.telnetterminal0.start_telnet=0        \
@@ -188,10 +232,9 @@ elif [[ ${target} == *"ethos-u55"* || ${target} == *"ethos-u65"* ]]; then
         ${semihosting_args_u55[@]+"${semihosting_args_u55[@]}"} \
         -a "${elf_file}"                                    \
         ${data_file}                                        \
-        --timelimit ${timeout} 2>&1 | sed 's/\r$//' | tee ${log_file} || true # seconds
-    echo "[${BASH_SOURCE[0]}] Simulation complete, $?"
+        --timelimit ${timeout} # seconds
 elif [[ ${target} == *"ethos-u85"*  ]]; then
-    ${nobuf} ${fvp_model}                                   \
+    run_simulation ${nobuf} ${fvp_model}                    \
         -C mps4_board.subsystem.ethosu.num_macs=${num_macs} \
         -C mps4_board.visualisation.disable-visualisation=1 \
         -C vis_hdlcd.disable_visualisation=1                \
@@ -203,8 +246,7 @@ elif [[ ${target} == *"ethos-u85"*  ]]; then
         ${semihosting_args_u85[@]+"${semihosting_args_u85[@]}"} \
         -a "${elf_file}"                                    \
         ${data_file}                                        \
-        --timelimit ${timeout} 2>&1 | sed 's/\r$//' | tee ${log_file} || true # seconds
-    echo "[${BASH_SOURCE[0]}] Simulation complete, $?"
+        --timelimit ${timeout} # seconds
 else
     echo "Running ${elf_file} for ${target} is not supported"
     exit 1
@@ -235,7 +277,7 @@ fi
 
 echo "Checking for problems in log:"
 problem_log=$(mktemp)
-grep -E "^(F|E|\\[critical\\]|Hard fault.|Info: Simulation is stopping. Reason: CPU time has been exceeded.).*$" "${log_file}" > "${problem_log}" || true
+grep -E "^([FE]([[:space:]:]|$)|Error|ERROR|Fatal|FATAL|Fail|\\[critical\\]|Hard fault.|Info: Simulation is stopping. Reason: CPU time has been exceeded.).*$" "${log_file}" > "${problem_log}" || true
 if [[ "${ethosu_fast}" == 1 ]]; then
     filtered_problem_log=$(mktemp)
     timing_adapter_fast_mode_regex="Failed to initialize timing-adapter #[0-9]+|Timing adapter has no effect if option --fast/-F is enabled"
@@ -245,6 +287,14 @@ fi
 if [[ -s "${problem_log}" ]]; then
     cat "${problem_log}"
     echo "Found ERROR"
+    rm "${problem_log}"
+    rm "${log_file}"
+    exit 1
+fi
+model_success_regex="Model run: 1|Model executed successfully\."
+model_success_regex+="|Inference complete: [1-9][0-9]* output\(s\)"
+if ! grep -Eq "${model_success_regex}" "${log_file}"; then
+    echo "No successful model execution found in log"
     rm "${problem_log}"
     rm "${log_file}"
     exit 1

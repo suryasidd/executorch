@@ -158,12 +158,9 @@ Error copy_tensor_data(const at::Tensor& t_dst, const at::Tensor& t_src) {
                            ->data_ptr()
                            .get();
 
-  // Currently even 0 sized tensors receive a dataptr in pre_allocated
-  // memory planning so we can do this check.
-  // TODO(jakeszwe, shunting, gasoonjia): this should be clear in design if
-  // other people make their own memory plans
+  // A zero-sized planned tensor may legitimately have no allocated storage.
   ET_CHECK_OR_RETURN_ERROR(
-      dst_data_ptr != nullptr,
+      dst_data_ptr != nullptr || t_dst.nbytes() == 0,
       InvalidArgument,
       "Destination tensor data pointer must not be null.");
 
@@ -177,6 +174,21 @@ Error copy_tensor_data(const at::Tensor& t_dst, const at::Tensor& t_src) {
         t_src.nbytes());
     // Copy the source data to the preallocated memory of the destination, which
     // must be the same size as the source.
+    //
+    // Both sides have to be host memory. Reaching here with device memory means
+    // a program planned a buffer for a tensor that lives on an accelerator, and
+    // a host memcpy into it is undefined. Reported because the alternative is a
+    // crash with no message.
+    ET_CHECK_OR_RETURN_ERROR(
+        t_dst.device().is_cpu() && t_src.device().is_cpu(),
+        NotSupported,
+        // Kept under the 256-char log buffer (runtime/platform/log.cpp) so the
+        // MemoryPlanningPass hint, which is the actionable part, is not
+        // truncated away.
+        "Planned-buffer copy needs host memory on both sides: dst device %s, src device %s. "
+        "Export with MemoryPlanningPass(alloc_graph_input=False) to share the caller's memory.",
+        c10::DeviceTypeName(t_dst.device().type()).c_str(),
+        c10::DeviceTypeName(t_src.device().type()).c_str());
     std::memcpy(dst_data_ptr, t_src.const_data_ptr(), t_src.nbytes());
   }
 
